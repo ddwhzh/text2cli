@@ -1,0 +1,33 @@
+services:
+  web:
+    build: .
+    ports:
+      - "${T2_PORT:-8770}:8770"
+    volumes:
+      - t2-data:/data
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    env_file: .env
+    environment:
+      - T2_HOST=0.0.0.0
+      - T2_PORT=8770
+      - T2_DB=/data/workspace.db
+    command: ["t2-web", "--host", "0.0.0.0", "--port", "8770", "--db", "/data/workspace.db"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8770/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "2"
+
+volumes:
+  t2-data:
