@@ -19,9 +19,15 @@ dependencies = [
     "fusepy>=3.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
 [project.scripts]
 t2 = "text2cli.cli:main"
 t2-web = "text2cli.web:main"
+t2-sandbox = "text2cli.sandbox_service:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

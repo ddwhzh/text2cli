@@ -113,5 +113,168 @@ class TestWorkspaceToolsWithExecutor(unittest.TestCase):
         self.assertEqual(len(tools_with_search), 22)
 
 
+class _DummyFuseManager:
+    def __init__(self, work_dir: str) -> None:
+        self._work_dir = work_dir
+
+    def ensure_mounted(self, workspace: str) -> str:  # noqa: ARG002
+        return self._work_dir
+
+
+class TestExecutorPolicy(unittest.TestCase):
+    def test_local_untrusted_disables_host_backend(self) -> None:
+        from text2cli.code_executor import CodeExecutor, ExecutorPolicy, EXEC_BACKEND_HOST, EXEC_MODE_UNTRUSTED
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            policy = ExecutorPolicy(mode=EXEC_MODE_UNTRUSTED, backend=EXEC_BACKEND_HOST)
+            exec_ = CodeExecutor(_DummyFuseManager(temp_dir.name), policy=policy)  # type: ignore[arg-type]
+            result = exec_.execute("main", "python", "print('hi')", timeout=1)
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("local-untrusted", result.stderr)
+            self.assertIn("T2_EXEC_BACKEND=docker", result.stderr)
+        finally:
+            temp_dir.cleanup()
+
+
+class TestExecutorScheduler(unittest.TestCase):
+    def test_auto_prefers_docker_over_remote_when_available(self) -> None:
+        from text2cli.code_executor import CodeExecutor, ExecutorPolicy, EXEC_BACKEND_AUTO, EXEC_BACKEND_DOCKER, EXEC_MODE_UNTRUSTED
+        from unittest.mock import patch
+        policy = ExecutorPolicy(mode=EXEC_MODE_UNTRUSTED, backend=EXEC_BACKEND_AUTO, scheduler_enabled=True, remote_url="http://127.0.0.1:9770")
+        exec_ = CodeExecutor(_DummyFuseManager("/tmp"), policy=policy)  # type: ignore[arg-type]
+        with patch("text2cli.code_executor.shutil.which", return_value="/usr/bin/docker"):
+            self.assertEqual(exec_._select_backend(), EXEC_BACKEND_DOCKER)  # noqa: SLF001
+
+    def test_auto_uses_remote_when_docker_unavailable(self) -> None:
+        from text2cli.code_executor import CodeExecutor, ExecutorPolicy, EXEC_BACKEND_AUTO, EXEC_BACKEND_REMOTE, EXEC_MODE_UNTRUSTED
+        from unittest.mock import patch
+        policy = ExecutorPolicy(mode=EXEC_MODE_UNTRUSTED, backend=EXEC_BACKEND_AUTO, scheduler_enabled=True, remote_url="http://127.0.0.1:9770")
+        exec_ = CodeExecutor(_DummyFuseManager("/tmp"), policy=policy)  # type: ignore[arg-type]
+        with patch("text2cli.code_executor.shutil.which", return_value=None):
+            self.assertEqual(exec_._select_backend(), EXEC_BACKEND_REMOTE)  # noqa: SLF001
+
+
+class TestExecutorSchedulerMicroVM(unittest.TestCase):
+    def test_auto_can_select_microvm_when_configured(self) -> None:
+        from text2cli.code_executor import (
+            CodeExecutor,
+            ExecutorPolicy,
+            EXEC_BACKEND_AUTO,
+            EXEC_BACKEND_MICROVM,
+            EXEC_MODE_UNTRUSTED,
+        )
+        from unittest.mock import patch
+
+        policy = ExecutorPolicy(
+            mode=EXEC_MODE_UNTRUSTED,
+            backend=EXEC_BACKEND_AUTO,
+            scheduler_enabled=True,
+            remote_url="http://127.0.0.1:9770",
+            microvm_runtime="io.containerd.kata.v2",
+            pool_weights={"security": 10, "latency": 1, "cost": 1},
+        )
+        exec_ = CodeExecutor(_DummyFuseManager("/tmp"), policy=policy)  # type: ignore[arg-type]
+        with patch("text2cli.code_executor.shutil.which", return_value="/usr/bin/docker"):
+            self.assertEqual(exec_._select_backend(), EXEC_BACKEND_MICROVM)  # noqa: SLF001
+
+    def test_required_residency_filters_to_remote(self) -> None:
+        from text2cli.code_executor import (
+            CodeExecutor,
+            ExecutorPolicy,
+            EXEC_BACKEND_AUTO,
+            EXEC_BACKEND_REMOTE,
+            EXEC_MODE_UNTRUSTED,
+        )
+        from unittest.mock import patch
+
+        policy = ExecutorPolicy(
+            mode=EXEC_MODE_UNTRUSTED,
+            backend=EXEC_BACKEND_AUTO,
+            scheduler_enabled=True,
+            remote_url="http://127.0.0.1:9770",
+            required_residency="remote",
+        )
+        exec_ = CodeExecutor(_DummyFuseManager("/tmp"), policy=policy)  # type: ignore[arg-type]
+        with patch("text2cli.code_executor.shutil.which", return_value="/usr/bin/docker"):
+            self.assertEqual(exec_._select_backend(), EXEC_BACKEND_REMOTE)  # noqa: SLF001
+
+    def test_required_permission_domain_filters_to_microvm(self) -> None:
+        from text2cli.code_executor import (
+            CodeExecutor,
+            ExecutorPolicy,
+            EXEC_BACKEND_AUTO,
+            EXEC_BACKEND_MICROVM,
+            EXEC_MODE_UNTRUSTED,
+        )
+        from unittest.mock import patch
+
+        policy = ExecutorPolicy(
+            mode=EXEC_MODE_UNTRUSTED,
+            backend=EXEC_BACKEND_AUTO,
+            scheduler_enabled=True,
+            remote_url="http://127.0.0.1:9770",
+            microvm_runtime="io.containerd.kata.v2",
+            required_permission_domain="microvm",
+        )
+        exec_ = CodeExecutor(_DummyFuseManager("/tmp"), policy=policy)  # type: ignore[arg-type]
+        with patch("text2cli.code_executor.shutil.which", return_value="/usr/bin/docker"):
+            self.assertEqual(exec_._select_backend(), EXEC_BACKEND_MICROVM)  # noqa: SLF001
+
+
+class TestRemoteBackend(unittest.TestCase):
+    def test_remote_applies_changes_to_workspace_dir(self) -> None:
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from text2cli.code_executor import CodeExecutor, ExecutorPolicy, EXEC_BACKEND_REMOTE, EXEC_MODE_TRUSTED
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                raw = self.rfile.read(length)
+                _ = json.loads(raw.decode("utf-8"))  # request payload
+                resp = {
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "changes": {"a.txt": "new", "b.txt": "created"},
+                    "deletes": [],
+                }
+                data = json.dumps(resp).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, fmt, *args):  # noqa: A003
+                return
+
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "a.txt").write_text("old", encoding="utf-8")
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            host, port = server.server_address
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            try:
+                policy = ExecutorPolicy(
+                    mode=EXEC_MODE_TRUSTED,
+                    backend=EXEC_BACKEND_REMOTE,
+                    remote_url=f"http://{host}:{port}",
+                )
+                exec_ = CodeExecutor(_DummyFuseManager(td), policy=policy)  # type: ignore[arg-type]
+                result = exec_.execute("main", "python", "print('hi')", timeout=3)
+                self.assertEqual(result.exit_code, 0)
+                self.assertIn("ok", result.stdout)
+                self.assertEqual(Path(td, "a.txt").read_text(encoding="utf-8"), "new")
+                self.assertEqual(Path(td, "b.txt").read_text(encoding="utf-8"), "created")
+            finally:
+                server.shutdown()
+                server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

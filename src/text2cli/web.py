@@ -50,7 +50,8 @@ class Text2CLIApp:
         self.fuse_manager: FuseManager | None = None
         self.code_executor: CodeExecutor | None = None
         try:
-            self.fuse_manager = FuseManager(self.db)
+            mount_base = os.environ.get("T2_FUSE_MOUNT_BASE") or None
+            self.fuse_manager = FuseManager(self.db, mount_base=mount_base)
             self.code_executor = CodeExecutor(self.fuse_manager)
         except RuntimeError as exc:
             _log.warning("FUSE unavailable, code execution disabled: %s", exc)

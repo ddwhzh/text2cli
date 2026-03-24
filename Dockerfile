@@ -11,9 +11,9 @@ COPY src ./src
 COPY tests ./tests
 
 RUN python -m pip install --upgrade pip && \
-    python -m pip install .
+    python -m pip install ".[dev]"
 
-RUN python -m unittest discover -s tests -v
+RUN python -m pytest -q
 
 
 FROM python:3.12-slim AS runtime

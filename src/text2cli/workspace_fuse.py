@@ -35,7 +35,9 @@ class _MetaCache:
     """Lightweight TTL cache for file metadata to avoid per-syscall DB hits."""
 
     entries: dict[str, dict[str, Any]] = field(default_factory=dict)
-    ts: float = 0.0
+    # Ensure a freshly created cache is treated as expired so the first getattr/readdir
+    # refreshes metadata instead of returning an empty listing for up to ttl seconds.
+    ts: float = -1e9
     ttl: float = 2.0
 
     def expired(self) -> bool:
